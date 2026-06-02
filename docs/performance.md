@@ -3,8 +3,9 @@
 Wegdort is optimized for exact in-memory search before adding approximate
 nearest-neighbor indexes. The current search path uses bounded top-k selection,
 so it keeps only the best `k` candidates instead of sorting every stored vector.
-Cosine stores cache one Euclidean norm per vector row, so search computes the
-query norm once and reuses cached row norms while still preserving raw vectors.
+The production top-k path uses a binary heap. Cosine stores cache one Euclidean
+norm per vector row, so search computes the query norm once and reuses cached
+row norms while still preserving raw vectors.
 
 ## Benchmarks
 
@@ -24,6 +25,7 @@ The Criterion suite currently covers:
 
 - cosine, dot product, and squared L2 search;
 - cached cosine search over a larger store;
+- bounded-buffer and binary-heap top-k selection comparisons;
 - several store sizes for exact top-k search;
 - insert, replacement upsert, and remove loops;
 - binary snapshot path, reader/writer, and byte-buffer round trips;
@@ -42,7 +44,8 @@ Serial search keeps the crate dependency-light by default.
 
 Cosine search uses cached vector norms maintained by insert, upsert, remove,
 load, and snapshot creation. Dot product and squared L2 search do not use the
-norm cache.
+norm cache. Metric loops are written as indexed loops in the hot path to keep
+scoring predictable for the optimizer.
 
 ## Parallel Search
 

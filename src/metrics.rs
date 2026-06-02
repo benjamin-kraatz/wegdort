@@ -59,11 +59,23 @@ pub(crate) fn validate_vector(metric: Metric, vector: &[f32]) -> Result<()> {
 }
 
 pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(left, right)| left * right).sum()
+    let mut sum = 0.0;
+    let mut index = 0;
+    while index < a.len() {
+        sum += a[index] * b[index];
+        index += 1;
+    }
+    sum
 }
 
 pub(crate) fn vector_norm(vector: &[f32]) -> f32 {
-    vector.iter().map(|value| value * value).sum::<f32>().sqrt()
+    let mut sum = 0.0;
+    let mut index = 0;
+    while index < vector.len() {
+        sum += vector[index] * vector[index];
+        index += 1;
+    }
+    sum.sqrt()
 }
 
 pub(crate) fn cosine_with_norms(a: &[f32], norm_a: f32, b: &[f32], norm_b: f32) -> f32 {
@@ -75,13 +87,14 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b)
-        .map(|(left, right)| {
-            let diff = left - right;
-            diff * diff
-        })
-        .sum()
+    let mut sum = 0.0;
+    let mut index = 0;
+    while index < a.len() {
+        let diff = a[index] - b[index];
+        sum += diff * diff;
+        index += 1;
+    }
+    sum
 }
 
 fn is_zero_vector(vector: &[f32]) -> bool {

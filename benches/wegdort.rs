@@ -1,4 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::hint::black_box;
 use std::io::Cursor;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,6 +60,23 @@ fn bench_parallel_search(c: &mut Criterion) {
 #[cfg(not(feature = "parallel"))]
 fn bench_parallel_search(_c: &mut Criterion) {}
 
+fn bench_top_k_selection(c: &mut Criterion) {
+    let candidates = (0..10_000)
+        .map(|id| BenchRankedHit {
+            id,
+            score: ((id * 31) % 997) as f32 / 997.0,
+        })
+        .collect::<Vec<_>>();
+
+    c.bench_function("top_k/binary_heap/10k/k10", |b| {
+        b.iter(|| black_box(heap_top_k(black_box(&candidates), 10)));
+    });
+
+    c.bench_function("top_k/bounded_buffer/10k/k10", |b| {
+        b.iter(|| black_box(buffer_top_k(black_box(&candidates), 10)));
+    });
+}
+
 fn bench_writes(c: &mut Criterion) {
     c.bench_function("insert/10k/128d", |b| {
         b.iter(|| {
@@ -98,6 +117,83 @@ fn bench_writes(c: &mut Criterion) {
             black_box(store.len());
         });
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BenchRankedHit {
+    id: u64,
+    score: f32,
+}
+
+impl BenchRankedHit {
+    fn is_better_than(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Less
+    }
+}
+
+impl Eq for BenchRankedHit {}
+
+impl PartialOrd for BenchRankedHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BenchRankedHit {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+fn heap_top_k(candidates: &[BenchRankedHit], k: usize) -> Vec<BenchRankedHit> {
+    let mut heap = BinaryHeap::with_capacity(k);
+    for hit in candidates.iter().copied() {
+        if heap.len() < k {
+            heap.push(hit);
+        } else if let Some(worst) = heap.peek()
+            && hit.is_better_than(worst)
+        {
+            let _ = heap.pop();
+            heap.push(hit);
+        }
+    }
+
+    let mut hits = heap.into_iter().collect::<Vec<_>>();
+    hits.sort();
+    hits
+}
+
+fn buffer_top_k(candidates: &[BenchRankedHit], k: usize) -> Vec<BenchRankedHit> {
+    let mut hits = Vec::with_capacity(k);
+    let mut worst_index = None;
+    for hit in candidates.iter().copied() {
+        if hits.len() < k {
+            hits.push(hit);
+            if hits.len() == k {
+                worst_index = refresh_bench_worst_index(&hits);
+            }
+            continue;
+        }
+
+        let index = worst_index.expect("full top-k buffer has a worst hit");
+        if hit.is_better_than(&hits[index]) {
+            hits[index] = hit;
+            worst_index = refresh_bench_worst_index(&hits);
+        }
+    }
+
+    hits.sort();
+    hits
+}
+
+fn refresh_bench_worst_index(hits: &[BenchRankedHit]) -> Option<usize> {
+    hits.iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.cmp(right))
+        .map(|(index, _)| index)
 }
 
 fn bench_persistence(c: &mut Criterion) {
@@ -143,6 +239,7 @@ criterion_group!(
     benches,
     bench_search,
     bench_parallel_search,
+    bench_top_k_selection,
     bench_writes,
     bench_persistence
 );
