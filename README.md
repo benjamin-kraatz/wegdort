@@ -8,9 +8,9 @@ local vector similarity search without running a separate database service.
 The name comes from the German phrase "weg dort", which sounds close to
 "vector".
 
-> Project status: early rewrite. The current repository is being prepared for a
-> from-scratch implementation. Public APIs, module names, and persistence
-> details may change before the first stable release.
+> Project status: early v1. The crate exposes the first Rust API for in-memory
+> storage, exact flat search, immutable search snapshots, and custom binary
+> snapshots. Swift and TypeScript APIs are planned for later.
 
 ## Goals
 
@@ -27,30 +27,32 @@ The name comes from the German phrase "weg dort", which sounds close to
 - **Well documented**: document public APIs in code and keep Markdown
   documentation accurate as the architecture evolves.
 
-## Planned Features
+## Features
 
 - In-memory vector storage with a fixed dimension per store.
 - Caller-supplied vector ids.
-- Exact top-k flat search for the first production-ready search engine.
+- Exact top-k flat search.
 - Three core scoring modes:
   - cosine similarity, where higher scores are better;
   - dot product, where higher scores are better;
   - squared L2 distance, where lower distances are better.
-- Typed errors for dimension mismatches, invalid input, storage failures, and
-  persistence failures.
-- Optional file-backed snapshots for persistent storage.
+- Typed errors for dimension mismatches, duplicate ids, invalid input, storage
+  failures, and persistence failures.
+- Immutable read-only search snapshots.
+- Stable custom binary snapshots for persistence.
 - Rust API first.
 - Future Swift and TypeScript APIs through a dedicated bindings layer.
 
-## Future Rust API Shape
+## Rust API
 
-The final API may differ, but wegdort should feel close to this:
+Create a store, insert vectors, search top-k neighbors, and optionally save or
+load a snapshot:
 
 ```rust
 use wegdort::{Metric, Store, VectorId};
 
 fn main() -> Result<(), wegdort::Error> {
-    let mut store = Store::new(3).with_metric(Metric::Cosine);
+    let mut store = Store::new(3, Metric::Cosine)?;
 
     store.insert(VectorId::new(1), [1.0, 0.0, 0.0])?;
     store.insert(VectorId::new(2), [0.0, 1.0, 0.0])?;
@@ -66,15 +68,17 @@ fn main() -> Result<(), wegdort::Error> {
 }
 ```
 
-The intended default is simple: create a store, insert vectors, search top-k
-neighbors, and optionally save or load a snapshot.
+`insert` rejects duplicate ids. Use `upsert` when replacement is intended.
+Vectors and queries must match the store dimension and contain finite `f32`
+values. Cosine stores reject zero vectors because cosine similarity is
+undefined for them.
 
-## Architecture Direction
+## Architecture
 
-Wegdort should become a library-first Rust crate. A small CLI or demo binary may
-exist later, but the crate API is the primary product.
+Wegdort is a library-first Rust crate. A small example lives in
+`examples/basic.rs`; the crate API is the primary product.
 
-The planned module structure is:
+The module structure is:
 
 - `metrics`: cosine, dot product, squared L2, and score ordering semantics.
 - `store`: the ergonomic user-facing vector store API.
@@ -82,20 +86,29 @@ The planned module structure is:
 - `search`: exact flat top-k search implementation.
 - `persistence`: optional file-backed snapshots.
 - `error`: typed errors used across public APIs.
-- `bindings` or `ffi`: future Swift and TypeScript integration boundary.
 
-Implementation should use modern Rust 2024 practices, strong types, contiguous
-storage where practical, minimal allocations during search, and clear separation
-between the in-memory hot path and optional persistence.
+The implementation uses modern Rust 2024 practices, strong types, contiguous
+row-major vector storage, and a clear separation between the in-memory hot path
+and optional persistence.
+
+## Persistence
+
+`Store::save` writes a custom little-endian binary snapshot with magic bytes,
+format version, metric id, dimensions, vector count, ids, and raw `f32` vector
+rows. `Store::load` validates the format and rejects incompatible or corrupted
+files.
+
+The format is stable for v1. It is optimized for compact files and fast
+sequential read/write, not memory-mapped access.
 
 ## Performance Philosophy
 
-The first version should make exact flat search excellent before adding
+The first version makes exact flat search the production path before adding
 approximate nearest-neighbor indexes. Flat search is simple, deterministic, easy
 to test, and often fast enough for embedded or local workloads when implemented
 with cache-friendly storage and tight metric loops.
 
-Performance work should be measured. Future optimization work should include
+Performance work should be measured. Future optimization work should add
 benchmarks for metric calculation, insertion, deletion, top-k search, snapshot
 save/load, and memory usage.
 

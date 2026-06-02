@@ -5,10 +5,9 @@ agentic tooling in this repository.
 
 ## Project Intent
 
-Wegdort is being rewritten from scratch as a small, fast, cross-platform vector
-store. The core product is a Rust library for in-memory vector storage and exact
-top-k similarity search, with optional persistence and future Swift and
-TypeScript APIs.
+Wegdort is a small, fast, cross-platform vector store. The core product is a
+Rust library for in-memory vector storage and exact top-k similarity search,
+with optional persistence and future Swift and TypeScript APIs.
 
 The first production search engine is exact flat search. The required metrics
 are cosine similarity, dot product, and squared L2 distance.
@@ -43,9 +42,8 @@ Keep files focused and modules logically grouped. The intended structure is:
 - `search`: exact top-k search algorithms.
 - `persistence`: optional file-backed snapshots.
 - `error`: typed error definitions.
-- `bindings` or `ffi`: future Swift and TypeScript API boundaries.
 
-The crate should be library-first. A CLI or demo binary may exist, but it must
+The crate is library-first. Examples may exist under `examples/`, but they must
 not own core behavior.
 
 ## Rust Implementation Rules
