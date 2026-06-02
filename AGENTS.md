@@ -10,7 +10,9 @@ Rust library for in-memory vector storage and exact top-k similarity search,
 with optional persistence and future Swift and TypeScript APIs.
 
 The first production search engine is exact flat search. The required metrics
-are cosine similarity, dot product, and squared L2 distance.
+are cosine similarity, dot product, and squared L2 distance. The current crate
+also includes bounded top-k selection, optional Rayon-backed parallel search, a
+Criterion benchmark suite, and examples under `examples/`.
 
 ## Before Changing Code
 
@@ -72,20 +74,28 @@ should cover at least:
 - dimension validation for inserts and queries;
 - top-k search correctness, including empty stores, `k = 0`, ties, and `k`
   greater than the number of stored vectors;
-- persistence round trips once a persistence format exists;
+- persistence round trips and invalid snapshot handling;
 - public API examples and doctests;
-- benchmark coverage for metric hot paths and flat search once benchmarks are
-  introduced.
+- benchmark coverage for metric hot paths, flat search, persistence, writes, and
+  optional parallel search.
 
 ## Verification
 
 Before finalizing implementation work, run the relevant subset of:
 
 ```sh
-cargo fmt
+cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
 cargo doc --no-deps --all-features
+```
+
+When a change affects performance, search behavior, persistence, or benchmarks,
+also run the relevant benchmark command:
+
+```sh
+cargo bench
+cargo bench --features parallel
 ```
 
 For documentation-only changes, proofread the changed Markdown and verify that

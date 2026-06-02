@@ -1,8 +1,8 @@
 # Wegdort
 
-Wegdort is a planned lightweight vector store for fast in-memory search, with
-optional persistent storage when durability matters. It is intended to be small,
-cross-platform, dependency-conscious, and easy to embed in applications that need
+Wegdort is a lightweight vector store for fast in-memory search, with optional
+persistent storage when durability matters. It is small, cross-platform,
+dependency-conscious by default, and easy to embed in applications that need
 local vector similarity search without running a separate database service.
 
 The name comes from the German phrase "weg dort", which sounds close to
@@ -10,7 +10,9 @@ The name comes from the German phrase "weg dort", which sounds close to
 
 > Project status: early v1. The crate exposes the first Rust API for in-memory
 > storage, exact flat search, immutable search snapshots, and custom binary
-> snapshots. Swift and TypeScript APIs are planned for later.
+> snapshots. It also includes Criterion benchmarks, a small demo CLI example,
+> and optional Rayon-powered parallel search. Swift and TypeScript APIs are
+> planned for later.
 
 ## Goals
 
@@ -42,6 +44,9 @@ The name comes from the German phrase "weg dort", which sounds close to
 - Bounded top-k search that avoids sorting every stored vector.
 - Optional Rayon-powered parallel search behind the `parallel` feature.
 - Stable custom binary snapshots for persistence.
+- Store capacity management, iteration, and builder APIs.
+- Criterion benchmark suite under `benches/`.
+- Demo CLI example under `examples/demo_cli.rs`.
 - Rust API first.
 - Future Swift and TypeScript APIs through a dedicated bindings layer.
 
@@ -102,7 +107,7 @@ Parallel exact search is available with the optional `parallel` feature:
 
 ```toml
 [dependencies]
-wegdort = { version = "0.1", features = ["parallel"] }
+wegdort = { path = ".", features = ["parallel"] }
 ```
 
 ```rust
@@ -164,9 +169,18 @@ files.
 The format is stable for v1. It is optimized for compact files and fast
 sequential read/write, not memory-mapped access.
 
+The v1 header layout is:
+
+- magic bytes: 8 bytes, currently `WEGDORT\0`;
+- format version: 2 bytes;
+- metric id: 1 byte;
+- reserved byte: 1 byte;
+- dimensions: 8 bytes;
+- vector count: 8 bytes.
+
 ## Performance Philosophy
 
-The first version makes exact flat search the production path before adding
+The current version makes exact flat search the production path before adding
 approximate nearest-neighbor indexes. Flat search is simple, deterministic, easy
 to test, and often fast enough for embedded or local workloads when implemented
 with cache-friendly storage and tight metric loops.
@@ -196,17 +210,18 @@ interfaces.
 
 ## Contributing
 
-The rewrite is still early. Before implementation work, agree on the intended
-API and behavior, then keep changes focused and well tested.
+The project is still early. Before implementation work, agree on the intended API
+and behavior, then keep changes focused and well tested.
 
 Contributors should run:
 
 ```sh
-cargo fmt
+cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
 cargo doc --no-deps --all-features
 cargo bench
+cargo bench --features parallel
 ```
 
 See [AGENTS.md](AGENTS.md) for detailed instructions for AI coding agents and

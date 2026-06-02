@@ -43,7 +43,7 @@ Enable Rayon-backed search with:
 
 ```toml
 [dependencies]
-wegdort = { version = "0.1", features = ["parallel"] }
+wegdort = { path = ".", features = ["parallel"] }
 ```
 
 Then call:
@@ -61,6 +61,12 @@ let hits = store.search_parallel([1.0, 0.0], 10)?;
 Parallel search is useful when stores are large enough that scoring dominates
 Rayon scheduling overhead. It validates inputs exactly like serial search and
 returns the same ordering.
+
+The demo CLI also exposes the parallel path:
+
+```sh
+cargo run --features parallel --example demo_cli -- parallel dot 3 1.0 0.1 0.0
+```
 
 ## Interpreting Results
 
