@@ -3,4 +3,16 @@ name = "wegdort"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1.10", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "wegdort"
+harness = false

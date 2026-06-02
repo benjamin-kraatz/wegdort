@@ -1,8 +1,10 @@
 use crate::error::{Error, Result};
 use crate::metrics::{Metric, validate_vector};
 use crate::persistence;
+#[cfg(feature = "parallel")]
+use crate::search::search_storage_parallel;
 use crate::search::{SearchHit, SearchSnapshot, search_storage};
-use crate::storage::{VectorId, VectorStorage};
+use crate::storage::{VectorId, VectorIter, VectorStorage};
 use std::path::Path;
 
 /// Result of an upsert operation.
@@ -12,6 +14,58 @@ pub enum UpsertResult {
     Inserted,
     /// The id existed and its vector was replaced.
     Replaced,
+}
+
+/// Builder for configuring a [`Store`] before construction.
+#[derive(Debug, Clone)]
+pub struct StoreBuilder {
+    dimensions: usize,
+    metric: Metric,
+    capacity: usize,
+}
+
+impl StoreBuilder {
+    /// Creates a builder for a store with fixed `dimensions`.
+    ///
+    /// The default metric is [`Metric::Cosine`] and the default capacity is `0`.
+    ///
+    /// ```
+    /// use wegdort::{Metric, StoreBuilder};
+    ///
+    /// let store = StoreBuilder::new(3)
+    ///     .metric(Metric::Dot)
+    ///     .capacity(128)
+    ///     .build()?;
+    ///
+    /// assert_eq!(store.dimensions(), 3);
+    /// assert_eq!(store.metric(), Metric::Dot);
+    /// assert!(store.capacity() >= 128);
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn new(dimensions: usize) -> Self {
+        Self {
+            dimensions,
+            metric: Metric::Cosine,
+            capacity: 0,
+        }
+    }
+
+    /// Sets the metric for the store.
+    pub fn metric(mut self, metric: Metric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    /// Sets the initial vector capacity for the store.
+    pub fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
+    /// Builds the configured store.
+    pub fn build(self) -> Result<Store> {
+        Store::with_capacity(self.dimensions, self.metric, self.capacity)
+    }
 }
 
 /// In-memory vector store with exact top-k search.
@@ -35,9 +89,22 @@ impl Store {
     /// # Ok::<(), wegdort::Error>(())
     /// ```
     pub fn new(dimensions: usize, metric: Metric) -> Result<Self> {
+        Self::with_capacity(dimensions, metric, 0)
+    }
+
+    /// Creates an empty store with enough capacity for at least `capacity` vectors.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store};
+    ///
+    /// let store = Store::with_capacity(3, Metric::Dot, 64)?;
+    /// assert!(store.capacity() >= 64);
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn with_capacity(dimensions: usize, metric: Metric, capacity: usize) -> Result<Self> {
         Ok(Self {
             metric,
-            storage: VectorStorage::new(dimensions)?,
+            storage: VectorStorage::with_capacity(dimensions, capacity)?,
         })
     }
 
@@ -93,6 +160,14 @@ impl Store {
         search_storage(&self.storage, self.metric, query.as_ref(), k)
     }
 
+    /// Searches the store with Rayon parallelism.
+    ///
+    /// This method is available only with the `parallel` feature.
+    #[cfg(feature = "parallel")]
+    pub fn search_parallel(&self, query: impl AsRef<[f32]>, k: usize) -> Result<Vec<SearchHit>> {
+        search_storage_parallel(&self.storage, self.metric, query.as_ref(), k)
+    }
+
     /// Creates an owned immutable snapshot that can be searched independently.
     ///
     /// ```
@@ -121,6 +196,46 @@ impl Store {
     /// Loads a store from a stable custom binary snapshot.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         persistence::load(path.as_ref())
+    }
+
+    /// Reserves capacity for at least `additional` more vectors.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store};
+    ///
+    /// let mut store = Store::new(3, Metric::Dot)?;
+    /// store.reserve(32);
+    /// assert!(store.capacity() >= 32);
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn reserve(&mut self, additional: usize) {
+        self.storage.reserve(additional);
+    }
+
+    /// Returns the current vector capacity.
+    pub fn capacity(&self) -> usize {
+        self.storage.capacity()
+    }
+
+    /// Removes all vectors while retaining allocated capacity.
+    pub fn clear(&mut self) {
+        self.storage.clear();
+    }
+
+    /// Iterates over ids and vector slices.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(7), [1.0, 2.0])?;
+    ///
+    /// let rows: Vec<_> = store.iter().collect();
+    /// assert_eq!(rows[0], (VectorId::new(7), [1.0, 2.0].as_slice()));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn iter(&self) -> VectorIter<'_> {
+        self.storage.iter()
     }
 
     /// Returns the fixed vector dimension.
@@ -237,5 +352,58 @@ mod tests {
         let store_hits = store.search([1.0, 0.0], 1).unwrap();
         assert_eq!(snapshot_hits[0].score, 1.0);
         assert_eq!(store_hits[0].score, 0.0);
+    }
+
+    #[test]
+    fn with_capacity_reserve_capacity_and_clear_work() {
+        let mut store = Store::with_capacity(3, Metric::Dot, 4).unwrap();
+        assert!(store.capacity() >= 4);
+
+        let before = store.capacity();
+        store.reserve(16);
+        assert!(store.capacity() >= before);
+
+        store.insert(VectorId::new(1), [1.0, 2.0, 3.0]).unwrap();
+        store.clear();
+        assert!(store.is_empty());
+        assert!(store.capacity() >= before);
+    }
+
+    #[test]
+    fn builder_uses_defaults_and_configuration() {
+        let default_store = StoreBuilder::new(2).build().unwrap();
+        assert_eq!(default_store.metric(), Metric::Cosine);
+
+        let configured = StoreBuilder::new(4)
+            .metric(Metric::SquaredL2)
+            .capacity(8)
+            .build()
+            .unwrap();
+        assert_eq!(configured.dimensions(), 4);
+        assert_eq!(configured.metric(), Metric::SquaredL2);
+        assert!(configured.capacity() >= 8);
+    }
+
+    #[test]
+    fn iter_returns_ids_and_vectors() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(10), [1.0, 2.0]).unwrap();
+
+        let rows = store.iter().collect::<Vec<_>>();
+        assert_eq!(rows, vec![(VectorId::new(10), [1.0, 2.0].as_slice())]);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_search_matches_serial_search() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(2), [1.0, 0.0]).unwrap();
+        store.insert(VectorId::new(1), [1.0, 0.0]).unwrap();
+        store.insert(VectorId::new(3), [0.0, 1.0]).unwrap();
+
+        assert_eq!(
+            store.search_parallel([1.0, 0.0], 2).unwrap(),
+            store.search([1.0, 0.0], 2).unwrap()
+        );
     }
 }

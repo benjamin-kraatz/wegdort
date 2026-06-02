@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::Hash;
 
 /// Caller-supplied identifier for a stored vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,16 +39,16 @@ pub(crate) struct VectorStorage {
 }
 
 impl VectorStorage {
-    pub(crate) fn new(dimensions: usize) -> Result<Self> {
+    pub(crate) fn with_capacity(dimensions: usize, capacity: usize) -> Result<Self> {
         if dimensions == 0 {
             return Err(Error::ZeroDimensions);
         }
 
         Ok(Self {
             dimensions,
-            ids: Vec::new(),
-            vectors: Vec::new(),
-            rows_by_id: HashMap::new(),
+            ids: Vec::with_capacity(capacity),
+            vectors: Vec::with_capacity(capacity.saturating_mul(dimensions)),
+            rows_by_id: HashMap::with_capacity(capacity),
         })
     }
 
@@ -139,6 +138,23 @@ impl VectorStorage {
         self.rows_by_id.contains_key(&id)
     }
 
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.ids.reserve(additional);
+        self.vectors
+            .reserve(additional.saturating_mul(self.dimensions));
+        self.rows_by_id.reserve(additional);
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.ids.capacity()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.ids.clear();
+        self.vectors.clear();
+        self.rows_by_id.clear();
+    }
+
     pub(crate) fn dimensions(&self) -> usize {
         self.dimensions
     }
@@ -159,6 +175,10 @@ impl VectorStorage {
         &self.vectors
     }
 
+    pub(crate) fn iter(&self) -> VectorIter<'_> {
+        VectorIter::new(&self.ids, &self.vectors, self.dimensions)
+    }
+
     pub(crate) fn vector(&self, row: usize) -> &[f32] {
         &self.vectors[self.row_range(row)]
     }
@@ -169,18 +189,60 @@ impl VectorStorage {
     }
 }
 
+/// Iterator over vector ids and vector slices.
+#[derive(Debug, Clone)]
+pub struct VectorIter<'a> {
+    ids: &'a [VectorId],
+    vectors: &'a [f32],
+    dimensions: usize,
+    row: usize,
+}
+
+impl<'a> VectorIter<'a> {
+    pub(crate) fn new(ids: &'a [VectorId], vectors: &'a [f32], dimensions: usize) -> Self {
+        Self {
+            ids,
+            vectors,
+            dimensions,
+            row: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for VectorIter<'a> {
+    type Item = (VectorId, &'a [f32]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = *self.ids.get(self.row)?;
+        let start = self.row * self.dimensions;
+        let vector = &self.vectors[start..start + self.dimensions];
+        self.row += 1;
+        Some((id, vector))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.ids.len().saturating_sub(self.row);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for VectorIter<'_> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn rejects_zero_dimensions() {
-        assert!(matches!(VectorStorage::new(0), Err(Error::ZeroDimensions)));
+        assert!(matches!(
+            VectorStorage::with_capacity(0, 0),
+            Err(Error::ZeroDimensions)
+        ));
     }
 
     #[test]
     fn insert_rejects_duplicates() {
-        let mut storage = VectorStorage::new(2).unwrap();
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
         storage.insert(VectorId::new(7), &[1.0, 2.0]).unwrap();
         assert!(matches!(
             storage.insert(VectorId::new(7), &[3.0, 4.0]),
@@ -190,7 +252,7 @@ mod tests {
 
     #[test]
     fn upsert_reports_replacement() {
-        let mut storage = VectorStorage::new(2).unwrap();
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
         assert!(!storage.upsert(VectorId::new(7), &[1.0, 2.0]));
         assert!(storage.upsert(VectorId::new(7), &[3.0, 4.0]));
         assert_eq!(storage.get(VectorId::new(7)), Some([3.0, 4.0].as_slice()));
@@ -198,7 +260,7 @@ mod tests {
 
     #[test]
     fn remove_updates_swapped_row_index() {
-        let mut storage = VectorStorage::new(2).unwrap();
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
         storage.insert(VectorId::new(1), &[1.0, 1.0]).unwrap();
         storage.insert(VectorId::new(2), &[2.0, 2.0]).unwrap();
         storage.insert(VectorId::new(3), &[3.0, 3.0]).unwrap();

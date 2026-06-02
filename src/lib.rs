@@ -29,5 +29,5 @@ mod store;
 pub use crate::error::{Error, Result};
 pub use crate::metrics::Metric;
 pub use crate::search::{SearchHit, SearchSnapshot};
-pub use crate::storage::VectorId;
-pub use crate::store::{Store, UpsertResult};
+pub use crate::storage::{VectorId, VectorIter};
+pub use crate::store::{Store, StoreBuilder, UpsertResult};

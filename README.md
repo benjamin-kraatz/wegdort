@@ -39,6 +39,8 @@ The name comes from the German phrase "weg dort", which sounds close to
 - Typed errors for dimension mismatches, duplicate ids, invalid input, storage
   failures, and persistence failures.
 - Immutable read-only search snapshots.
+- Bounded top-k search that avoids sorting every stored vector.
+- Optional Rayon-powered parallel search behind the `parallel` feature.
 - Stable custom binary snapshots for persistence.
 - Rust API first.
 - Future Swift and TypeScript APIs through a dedicated bindings layer.
@@ -72,6 +74,46 @@ fn main() -> Result<(), wegdort::Error> {
 Vectors and queries must match the store dimension and contain finite `f32`
 values. Cosine stores reject zero vectors because cosine similarity is
 undefined for them.
+
+Use the builder or capacity APIs when the expected size is known:
+
+```rust
+use wegdort::{Metric, StoreBuilder, VectorId};
+
+fn main() -> Result<(), wegdort::Error> {
+    let mut store = StoreBuilder::new(3)
+        .metric(Metric::Dot)
+        .capacity(10_000)
+        .build()?;
+
+    store.reserve(1_000);
+    store.insert(VectorId::new(1), [1.0, 2.0, 3.0])?;
+
+    for (id, vector) in store.iter() {
+        println!("id={} dims={}", id, vector.len());
+    }
+
+    store.clear();
+    Ok(())
+}
+```
+
+Parallel exact search is available with the optional `parallel` feature:
+
+```toml
+[dependencies]
+wegdort = { version = "0.1", features = ["parallel"] }
+```
+
+```rust
+# use wegdort::{Metric, Store, VectorId};
+# fn main() -> Result<(), wegdort::Error> {
+# let mut store = Store::new(2, Metric::Dot)?;
+# store.insert(VectorId::new(1), [1.0, 0.0])?;
+let hits = store.search_parallel([1.0, 0.0], 10)?;
+# Ok(())
+# }
+```
 
 ## Architecture
 
@@ -108,9 +150,9 @@ approximate nearest-neighbor indexes. Flat search is simple, deterministic, easy
 to test, and often fast enough for embedded or local workloads when implemented
 with cache-friendly storage and tight metric loops.
 
-Performance work should be measured. Future optimization work should add
-benchmarks for metric calculation, insertion, deletion, top-k search, snapshot
-save/load, and memory usage.
+Performance work should be measured. See [docs/performance.md](docs/performance.md)
+for benchmark commands, serial/parallel guidance, and the current benchmark
+scope.
 
 ## Documentation Expectations
 
@@ -143,6 +185,7 @@ cargo fmt
 cargo clippy --all-targets --all-features
 cargo test --all-features
 cargo doc --no-deps --all-features
+cargo bench
 ```
 
 See [AGENTS.md](AGENTS.md) for detailed instructions for AI coding agents and
