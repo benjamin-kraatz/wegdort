@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"WEGDORT\0";
 const VERSION: u16 = 1;
+// Header fields: magic(8) + version(2) + metric(1) + reserved(1)
+// + dimensions(8) + vector_count(8).
 const HEADER_LEN: usize = 8 + 2 + 1 + 1 + 8 + 8;
 
 pub(crate) fn save(store: &Store, path: &Path) -> Result<()> {

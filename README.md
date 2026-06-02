@@ -115,10 +115,31 @@ let hits = store.search_parallel([1.0, 0.0], 10)?;
 # }
 ```
 
+## Demo CLI Example
+
+The repository includes a small example CLI for demos. It is intentionally an
+example target, not the production wegdort CLI.
+
+```sh
+cargo run --example demo_cli -- list
+cargo run --example demo_cli -- search cosine 3 1.0 0.1 0.0
+cargo run --example demo_cli -- compare 3 0.1 0.2 1.0
+cargo run --example demo_cli -- snapshot cosine 3 0.1 0.2 1.0
+cargo run --example demo_cli -- save /tmp/wegdort-demo.wgd cosine
+cargo run --example demo_cli -- load /tmp/wegdort-demo.wgd 3 1.0 0.1 0.0
+```
+
+With parallel search enabled:
+
+```sh
+cargo run --features parallel --example demo_cli -- parallel dot 3 1.0 0.1 0.0
+```
+
 ## Architecture
 
 Wegdort is a library-first Rust crate. A small example lives in
-`examples/basic.rs`; the crate API is the primary product.
+`examples/basic.rs`, and a demo CLI example lives in `examples/demo_cli.rs`; the
+crate API is the primary product.
 
 The module structure is:
 
