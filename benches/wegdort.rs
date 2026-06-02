@@ -1,5 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::io::Cursor;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wegdort::{Metric, Store, VectorId};
 
@@ -30,6 +31,11 @@ fn bench_search(c: &mut Criterion) {
             b.iter(|| black_box(store.search(black_box(&query), 10).unwrap()));
         });
     }
+
+    let cosine_store = build_store(50_000, DIMENSIONS, Metric::Cosine);
+    c.bench_function("search/cosine_cached_norms/50k/128d/k10", |b| {
+        b.iter(|| black_box(cosine_store.search(black_box(&query), 10).unwrap()));
+    });
 
     for count in [100, 1_000, 10_000] {
         let store = build_store(count, DIMENSIONS, Metric::Dot);
@@ -103,6 +109,23 @@ fn bench_persistence(c: &mut Criterion) {
             store.save(&path).unwrap();
             let loaded = Store::load(&path).unwrap();
             let _ = std::fs::remove_file(&path);
+            black_box(loaded.len());
+        });
+    });
+
+    c.bench_function("snapshot_to_bytes_from_bytes/5k/128d", |b| {
+        b.iter(|| {
+            let bytes = store.to_bytes().unwrap();
+            let loaded = Store::from_bytes(black_box(&bytes)).unwrap();
+            black_box(loaded.len());
+        });
+    });
+
+    c.bench_function("snapshot_writer_reader/5k/128d", |b| {
+        b.iter(|| {
+            let mut bytes = Vec::new();
+            store.save_writer(&mut bytes).unwrap();
+            let loaded = Store::load_reader(&mut Cursor::new(black_box(bytes))).unwrap();
             black_box(loaded.len());
         });
     });

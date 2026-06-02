@@ -14,7 +14,7 @@ const HEADER_LEN: usize = 8 + 2 + 1 + 1 + 8 + 8;
 
 pub(crate) fn save(store: &Store, path: &Path) -> Result<()> {
     let temp_path = temp_path_for(path);
-    let write_result = write_snapshot(store, &temp_path);
+    let write_result = write_snapshot_file(store, &temp_path);
 
     match write_result {
         Ok(()) => {
@@ -29,30 +29,54 @@ pub(crate) fn save(store: &Store, path: &Path) -> Result<()> {
 }
 
 pub(crate) fn load(path: &Path) -> Result<Store> {
+    let mut file = File::open(path)?;
+    load_reader(&mut file)
+}
+
+pub(crate) fn save_writer(store: &Store, writer: &mut impl Write) -> Result<()> {
+    write_snapshot(store, writer)
+}
+
+pub(crate) fn load_reader(reader: &mut impl Read) -> Result<Store> {
     let mut bytes = Vec::new();
-    File::open(path)?.read_to_end(&mut bytes)?;
+    reader.read_to_end(&mut bytes)?;
     read_snapshot(&bytes)
 }
 
-fn write_snapshot(store: &Store, path: &Path) -> Result<()> {
+pub(crate) fn to_bytes(store: &Store) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_snapshot(store, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Store> {
+    read_snapshot(bytes)
+}
+
+fn write_snapshot_file(store: &Store, path: &Path) -> Result<()> {
     let mut file = File::create(path)?;
-    file.write_all(MAGIC)?;
-    file.write_all(&VERSION.to_le_bytes())?;
-    file.write_all(&[store.metric().to_u8()])?;
-    file.write_all(&[0])?;
-    file.write_all(&(store.dimensions() as u64).to_le_bytes())?;
-    file.write_all(&(store.len() as u64).to_le_bytes())?;
+    write_snapshot(store, &mut file)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn write_snapshot(store: &Store, writer: &mut impl Write) -> Result<()> {
+    writer.write_all(MAGIC)?;
+    writer.write_all(&VERSION.to_le_bytes())?;
+    writer.write_all(&[store.metric().to_u8()])?;
+    writer.write_all(&[0])?;
+    writer.write_all(&(store.dimensions() as u64).to_le_bytes())?;
+    writer.write_all(&(store.len() as u64).to_le_bytes())?;
 
     for (row, id) in store.ids().iter().copied().enumerate() {
-        file.write_all(&id.get().to_le_bytes())?;
+        writer.write_all(&id.get().to_le_bytes())?;
         let start = row * store.dimensions();
         let vector = &store.vectors()[start..start + store.dimensions()];
         for value in vector {
-            file.write_all(&value.to_le_bytes())?;
+            writer.write_all(&value.to_le_bytes())?;
         }
     }
 
-    file.sync_all()?;
     Ok(())
 }
 
@@ -161,6 +185,7 @@ fn temp_path_for(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -186,12 +211,69 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_empty_store() {
+        let path = test_path("empty-round-trip");
+        let store = Store::new(2, Metric::Dot).unwrap();
+
+        save(&store, &path).unwrap();
+        let loaded = load(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.dimensions(), 2);
+        assert_eq!(loaded.metric(), Metric::Dot);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn writer_and_reader_round_trip_each_metric() {
+        for metric in [Metric::Cosine, Metric::Dot, Metric::SquaredL2] {
+            let mut store = Store::new(2, metric).unwrap();
+            store.insert(VectorId::new(1), [1.0, 0.0]).unwrap();
+            store.insert(VectorId::new(2), [0.0, 1.0]).unwrap();
+
+            let mut bytes = Vec::new();
+            save_writer(&store, &mut bytes).unwrap();
+            let loaded = load_reader(&mut Cursor::new(bytes)).unwrap();
+
+            assert_eq!(loaded.metric(), metric);
+            assert_eq!(loaded.len(), 2);
+            assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 0.0].as_slice()));
+        }
+    }
+
+    #[test]
+    fn bytes_round_trip_empty_and_non_empty_stores() {
+        let empty = Store::new(2, Metric::Dot).unwrap();
+        assert!(from_bytes(&to_bytes(&empty).unwrap()).unwrap().is_empty());
+
+        let mut store = Store::new(2, Metric::SquaredL2).unwrap();
+        store.insert(VectorId::new(1), [1.0, 2.0]).unwrap();
+
+        let loaded = from_bytes(&to_bytes(&store).unwrap()).unwrap();
+        assert_eq!(loaded.metric(), Metric::SquaredL2);
+        assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 2.0].as_slice()));
+    }
+
+    #[test]
     fn rejects_bad_magic() {
         let mut bytes = valid_bytes();
         bytes[0] = b'X';
         assert!(matches!(
             read_snapshot(&bytes),
             Err(Error::InvalidSnapshot("missing wegdort magic bytes"))
+        ));
+    }
+
+    #[test]
+    fn reader_and_bytes_return_same_error_for_invalid_snapshot() {
+        let invalid = [];
+        assert!(matches!(
+            from_bytes(&invalid),
+            Err(Error::CorruptedFile("file is shorter than snapshot header"))
+        ));
+        assert!(matches!(
+            load_reader(&mut Cursor::new(invalid)),
+            Err(Error::CorruptedFile("file is shorter than snapshot header"))
         ));
     }
 
@@ -212,6 +294,31 @@ mod tests {
         assert!(matches!(
             read_snapshot(&bytes),
             Err(Error::InvalidSnapshot("invalid metric id"))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_zero_reserved_header_byte() {
+        let mut bytes = valid_bytes();
+        bytes[11] = 1;
+        assert!(matches!(
+            read_snapshot(&bytes),
+            Err(Error::InvalidSnapshot("reserved header byte must be zero"))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_dimensions_in_header() {
+        let mut bytes = valid_bytes();
+        bytes[12..20].copy_from_slice(&0_u64.to_le_bytes());
+        assert!(matches!(read_snapshot(&bytes), Err(Error::ZeroDimensions)));
+    }
+
+    #[test]
+    fn rejects_header_only_truncated_file() {
+        assert!(matches!(
+            read_snapshot(&valid_bytes()[..HEADER_LEN - 1]),
+            Err(Error::CorruptedFile("file is shorter than snapshot header"))
         ));
     }
 
@@ -240,6 +347,18 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_removes_temp_file() {
+        let path = std::env::temp_dir()
+            .join("wegdort-missing-parent")
+            .join("snapshot.wgd");
+        let temp_path = temp_path_for(&path);
+        let store = Store::new(2, Metric::Dot).unwrap();
+
+        assert!(save(&store, &path).is_err());
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
     fn rejects_non_finite_values() {
         let mut bytes = valid_bytes();
         let first_value = HEADER_LEN + 8;
@@ -256,6 +375,20 @@ mod tests {
         bytes[first_value + 4..first_value + 8].copy_from_slice(&0.0_f32.to_le_bytes());
         assert!(matches!(
             read_snapshot(&bytes),
+            Err(Error::ZeroVectorForCosine)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_cosine_zero_vector() {
+        let mut bytes = valid_bytes();
+        bytes[10] = Metric::Cosine.to_u8();
+        let first_value = HEADER_LEN + 8;
+        bytes[first_value..first_value + 4].copy_from_slice(&0.0_f32.to_le_bytes());
+        bytes[first_value + 4..first_value + 8].copy_from_slice(&0.0_f32.to_le_bytes());
+
+        assert!(matches!(
+            from_bytes(&bytes),
             Err(Error::ZeroVectorForCosine)
         ));
     }

@@ -42,11 +42,14 @@ The name comes from the German phrase "weg dort", which sounds close to
   failures, and persistence failures.
 - Immutable read-only search snapshots.
 - Bounded top-k search that avoids sorting every stored vector.
+- Cached vector norms for cosine search while preserving raw stored vectors.
 - Optional Rayon-powered parallel search behind the `parallel` feature.
-- Stable custom binary snapshots for persistence.
+- Stable custom binary snapshots for path, reader/writer, and byte persistence.
 - Store capacity management, iteration, and builder APIs.
 - Criterion benchmark suite under `benches/`.
 - Demo CLI example under `examples/demo_cli.rs`.
+- Documented v1 snapshot format under
+  [docs/snapshot-format.md](docs/snapshot-format.md).
 - Rust API first.
 - Future Swift and TypeScript APIs through a dedicated bindings layer.
 
@@ -150,9 +153,9 @@ The module structure is:
 
 - `metrics`: cosine, dot product, squared L2, and score ordering semantics.
 - `store`: the ergonomic user-facing vector store API.
-- `storage`: compact in-memory id and vector layout.
+- `storage`: compact in-memory id, vector, and cached norm layout.
 - `search`: exact flat top-k search implementation.
-- `persistence`: optional file-backed snapshots.
+- `persistence`: optional binary snapshots for files, streams, and byte buffers.
 - `error`: typed errors used across public APIs.
 
 The implementation uses modern Rust 2024 practices, strong types, contiguous
@@ -161,22 +164,17 @@ and optional persistence.
 
 ## Persistence
 
-`Store::save` writes a custom little-endian binary snapshot with magic bytes,
-format version, metric id, dimensions, vector count, ids, and raw `f32` vector
-rows. `Store::load` validates the format and rejects incompatible or corrupted
-files.
+`Store::save` writes a custom little-endian binary snapshot with the store
+metric, dimensions, ids, and raw `f32` vector rows. `Store::load` validates the
+format and rejects incompatible or corrupted files. The same v1 format is
+available through `Store::save_writer`, `Store::load_reader`,
+`Store::to_bytes`, and `Store::from_bytes` for callers that want to manage
+storage or transport themselves.
 
 The format is stable for v1. It is optimized for compact files and fast
-sequential read/write, not memory-mapped access.
-
-The v1 header layout is:
-
-- magic bytes: 8 bytes, currently `WEGDORT\0`;
-- format version: 2 bytes;
-- metric id: 1 byte;
-- reserved byte: 1 byte;
-- dimensions: 8 bytes;
-- vector count: 8 bytes.
+sequential read/write, not memory-mapped access. See the dedicated
+[snapshot format document](docs/snapshot-format.md) for the byte layout,
+validation rules, and compatibility guidance.
 
 ## Performance Philosophy
 

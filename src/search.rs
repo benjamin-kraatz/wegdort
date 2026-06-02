@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::metrics::{Metric, validate_vector};
+use crate::metrics::{Metric, cosine_with_norms, validate_vector, vector_norm};
 use crate::storage::{VectorId, VectorIter, VectorStorage};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -26,6 +26,7 @@ pub struct SearchSnapshot {
     metric: Metric,
     ids: Vec<VectorId>,
     vectors: Vec<f32>,
+    norms: Vec<f32>,
 }
 
 impl SearchSnapshot {
@@ -35,6 +36,7 @@ impl SearchSnapshot {
             metric,
             ids: storage.ids().to_vec(),
             vectors: storage.vectors().to_vec(),
+            norms: storage.norms().to_vec(),
         }
     }
 
@@ -45,6 +47,7 @@ impl SearchSnapshot {
             self.metric,
             &self.ids,
             &self.vectors,
+            &self.norms,
             query.as_ref(),
             k,
         )
@@ -60,6 +63,7 @@ impl SearchSnapshot {
             self.metric,
             &self.ids,
             &self.vectors,
+            &self.norms,
             query.as_ref(),
             k,
         )
@@ -102,6 +106,7 @@ pub(crate) fn search_storage(
         metric,
         storage.ids(),
         storage.vectors(),
+        storage.norms(),
         query,
         k,
     )
@@ -119,6 +124,7 @@ pub(crate) fn search_storage_parallel(
         metric,
         storage.ids(),
         storage.vectors(),
+        storage.norms(),
         query,
         k,
     )
@@ -129,6 +135,7 @@ fn search_flat(
     metric: Metric,
     ids: &[VectorId],
     vectors: &[f32],
+    norms: &[f32],
     query: &[f32],
     k: usize,
 ) -> Result<Vec<SearchHit>> {
@@ -146,18 +153,38 @@ fn search_flat(
     }
 
     let mut heap = BinaryHeap::with_capacity(k.min(ids.len()));
-    for (row, id) in ids.iter().copied().enumerate() {
-        let start = row * dimensions;
-        let vector = &vectors[start..start + dimensions];
-        push_top_k(
-            &mut heap,
-            k,
-            RankedHit {
-                id,
-                score: metric.score(query, vector),
-                metric,
-            },
-        );
+    match metric {
+        Metric::Cosine => {
+            let query_norm = vector_norm(query);
+            for (row, id) in ids.iter().copied().enumerate() {
+                let start = row * dimensions;
+                let vector = &vectors[start..start + dimensions];
+                push_top_k(
+                    &mut heap,
+                    k,
+                    RankedHit {
+                        id,
+                        score: cosine_with_norms(query, query_norm, vector, norms[row]),
+                        metric,
+                    },
+                );
+            }
+        }
+        Metric::Dot | Metric::SquaredL2 => {
+            for (row, id) in ids.iter().copied().enumerate() {
+                let start = row * dimensions;
+                let vector = &vectors[start..start + dimensions];
+                push_top_k(
+                    &mut heap,
+                    k,
+                    RankedHit {
+                        id,
+                        score: metric.score(query, vector),
+                        metric,
+                    },
+                );
+            }
+        }
     }
 
     Ok(sorted_hits(heap, metric))
@@ -169,6 +196,7 @@ fn search_flat_parallel(
     metric: Metric,
     ids: &[VectorId],
     vectors: &[f32],
+    norms: &[f32],
     query: &[f32],
     k: usize,
 ) -> Result<Vec<SearchHit>> {
@@ -185,36 +213,70 @@ fn search_flat_parallel(
         return Ok(Vec::new());
     }
 
-    let hits = ids
-        .par_iter()
-        .copied()
-        .enumerate()
-        .fold(
-            || BinaryHeap::with_capacity(k),
-            |mut heap, (row, id)| {
-                let start = row * dimensions;
-                let vector = &vectors[start..start + dimensions];
-                push_top_k(
-                    &mut heap,
-                    k,
-                    RankedHit {
-                        id,
-                        score: metric.score(query, vector),
-                        metric,
+    let hits = match metric {
+        Metric::Cosine => {
+            let query_norm = vector_norm(query);
+            ids.par_iter()
+                .copied()
+                .enumerate()
+                .fold(
+                    || BinaryHeap::with_capacity(k),
+                    |mut heap, (row, id)| {
+                        let start = row * dimensions;
+                        let vector = &vectors[start..start + dimensions];
+                        push_top_k(
+                            &mut heap,
+                            k,
+                            RankedHit {
+                                id,
+                                score: cosine_with_norms(query, query_norm, vector, norms[row]),
+                                metric,
+                            },
+                        );
+                        heap
                     },
-                );
-                heap
-            },
-        )
-        .reduce(
-            || BinaryHeap::with_capacity(k),
-            |mut left, right| {
-                for hit in right {
-                    push_top_k(&mut left, k, hit);
-                }
-                left
-            },
-        );
+                )
+                .reduce(
+                    || BinaryHeap::with_capacity(k),
+                    |mut left, right| {
+                        for hit in right {
+                            push_top_k(&mut left, k, hit);
+                        }
+                        left
+                    },
+                )
+        }
+        Metric::Dot | Metric::SquaredL2 => ids
+            .par_iter()
+            .copied()
+            .enumerate()
+            .fold(
+                || BinaryHeap::with_capacity(k),
+                |mut heap, (row, id)| {
+                    let start = row * dimensions;
+                    let vector = &vectors[start..start + dimensions];
+                    push_top_k(
+                        &mut heap,
+                        k,
+                        RankedHit {
+                            id,
+                            score: metric.score(query, vector),
+                            metric,
+                        },
+                    );
+                    heap
+                },
+            )
+            .reduce(
+                || BinaryHeap::with_capacity(k),
+                |mut left, right| {
+                    for hit in right {
+                        push_top_k(&mut left, k, hit);
+                    }
+                    left
+                },
+            ),
+    };
 
     Ok(sorted_hits(hits, metric))
 }
@@ -290,6 +352,17 @@ impl Ord for RankedHit {
 mod tests {
     use super::*;
 
+    fn uncached_cosine(query: &[f32], vector: &[f32]) -> f32 {
+        let dot = query
+            .iter()
+            .zip(vector)
+            .map(|(left, right)| left * right)
+            .sum::<f32>();
+        let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let vector_norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        dot / (query_norm * vector_norm)
+    }
+
     fn full_sort(
         storage: &VectorStorage,
         metric: Metric,
@@ -331,6 +404,23 @@ mod tests {
     }
 
     #[test]
+    fn returns_empty_for_empty_storage() {
+        let storage = VectorStorage::with_capacity(2, 0).unwrap();
+        let hits = search_storage(&storage, Metric::Dot, &[1.0, 0.0], 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn returns_all_hits_when_k_exceeds_len() {
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
+        storage.insert(VectorId::new(1), &[1.0, 0.0]).unwrap();
+        storage.insert(VectorId::new(2), &[0.0, 1.0]).unwrap();
+
+        let hits = search_storage(&storage, Metric::Dot, &[1.0, 0.0], 99).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
     fn orders_similarity_highest_first_with_id_tie_break() {
         let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
         storage.insert(VectorId::new(2), &[1.0, 0.0]).unwrap();
@@ -355,6 +445,22 @@ mod tests {
     }
 
     #[test]
+    fn orders_ties_by_id_for_each_metric() {
+        for metric in [Metric::Cosine, Metric::Dot, Metric::SquaredL2] {
+            let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
+            storage.insert(VectorId::new(9), &[1.0, 0.0]).unwrap();
+            storage.insert(VectorId::new(3), &[1.0, 0.0]).unwrap();
+            storage.insert(VectorId::new(6), &[1.0, 0.0]).unwrap();
+
+            let hits = search_storage(&storage, metric, &[1.0, 0.0], 3).unwrap();
+            assert_eq!(
+                hits.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+                vec![VectorId::new(3), VectorId::new(6), VectorId::new(9)]
+            );
+        }
+    }
+
+    #[test]
     fn rejects_wrong_query_dimensions() {
         let storage = VectorStorage::with_capacity(2, 0).unwrap();
         assert!(matches!(
@@ -363,6 +469,15 @@ mod tests {
                 expected: 2,
                 actual: 1
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_non_finite_query() {
+        let storage = VectorStorage::with_capacity(2, 0).unwrap();
+        assert!(matches!(
+            search_storage(&storage, Metric::Dot, &[1.0, f32::INFINITY], 1),
+            Err(Error::NonFiniteValue)
         ));
     }
 
@@ -392,6 +507,19 @@ mod tests {
     }
 
     #[test]
+    fn cached_cosine_matches_uncached_formula() {
+        let mut storage = VectorStorage::with_capacity(3, 0).unwrap();
+        storage.insert(VectorId::new(1), &[1.0, 2.0, 3.0]).unwrap();
+        storage.insert(VectorId::new(2), &[2.0, 1.0, 0.5]).unwrap();
+        let query = [0.5, 1.5, 2.5];
+
+        let hits = search_storage(&storage, Metric::Cosine, &query, 2).unwrap();
+        let expected = uncached_cosine(&query, storage.get(hits[0].id).unwrap());
+
+        assert!((hits[0].score - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn snapshot_iter_returns_ids_and_vectors() {
         let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
         storage.insert(VectorId::new(1), &[1.0, 0.0]).unwrap();
@@ -399,6 +527,20 @@ mod tests {
 
         let rows = snapshot.iter().collect::<Vec<_>>();
         assert_eq!(rows, vec![(VectorId::new(1), [1.0, 0.0].as_slice())]);
+    }
+
+    #[test]
+    fn snapshot_cosine_uses_cached_norms_without_changing_vectors() {
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
+        storage.insert(VectorId::new(1), &[3.0, 4.0]).unwrap();
+        let snapshot = SearchSnapshot::new(&storage, Metric::Cosine);
+
+        let hits = snapshot.search([6.0, 8.0], 1).unwrap();
+        assert_eq!(hits[0].score, 1.0);
+        assert_eq!(
+            snapshot.iter().collect::<Vec<_>>(),
+            vec![(VectorId::new(1), [3.0, 4.0].as_slice())]
+        );
     }
 
     #[cfg(feature = "parallel")]

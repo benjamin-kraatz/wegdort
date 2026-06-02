@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::metrics::vector_norm;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -35,6 +36,7 @@ pub(crate) struct VectorStorage {
     dimensions: usize,
     ids: Vec<VectorId>,
     vectors: Vec<f32>,
+    norms: Vec<f32>,
     rows_by_id: HashMap<VectorId, usize>,
 }
 
@@ -48,6 +50,7 @@ impl VectorStorage {
             dimensions,
             ids: Vec::with_capacity(capacity),
             vectors: Vec::with_capacity(capacity.saturating_mul(dimensions)),
+            norms: Vec::with_capacity(capacity),
             rows_by_id: HashMap::with_capacity(capacity),
         })
     }
@@ -73,11 +76,16 @@ impl VectorStorage {
                 return Err(Error::CorruptedFile("duplicate vector id"));
             }
         }
+        let norms = vectors
+            .chunks_exact(dimensions)
+            .map(vector_norm)
+            .collect::<Vec<_>>();
 
         Ok(Self {
             dimensions,
             ids,
             vectors,
+            norms,
             rows_by_id,
         })
     }
@@ -90,6 +98,7 @@ impl VectorStorage {
         let row = self.ids.len();
         self.ids.push(id);
         self.vectors.extend_from_slice(vector);
+        self.norms.push(vector_norm(vector));
         self.rows_by_id.insert(id, row);
         Ok(())
     }
@@ -98,11 +107,13 @@ impl VectorStorage {
         if let Some(row) = self.rows_by_id.get(&id).copied() {
             let range = self.row_range(row);
             self.vectors[range].copy_from_slice(vector);
+            self.norms[row] = vector_norm(vector);
             true
         } else {
             let row = self.ids.len();
             self.ids.push(id);
             self.vectors.extend_from_slice(vector);
+            self.norms.push(vector_norm(vector));
             self.rows_by_id.insert(id, row);
             false
         }
@@ -116,13 +127,16 @@ impl VectorStorage {
         if row != last_row {
             let last_id = self.ids[last_row];
             let last_vector = self.vector(last_row).to_vec();
+            let last_norm = self.norms[last_row];
             let target_range = self.row_range(row);
             self.vectors[target_range].copy_from_slice(&last_vector);
+            self.norms[row] = last_norm;
             self.ids[row] = last_id;
             self.rows_by_id.insert(last_id, row);
         }
 
         self.ids.pop();
+        self.norms.pop();
         self.vectors.truncate(self.ids.len() * self.dimensions);
         Some(removed)
     }
@@ -142,6 +156,7 @@ impl VectorStorage {
         self.ids.reserve(additional);
         self.vectors
             .reserve(additional.saturating_mul(self.dimensions));
+        self.norms.reserve(additional);
         self.rows_by_id.reserve(additional);
     }
 
@@ -152,6 +167,7 @@ impl VectorStorage {
     pub(crate) fn clear(&mut self) {
         self.ids.clear();
         self.vectors.clear();
+        self.norms.clear();
         self.rows_by_id.clear();
     }
 
@@ -173,6 +189,10 @@ impl VectorStorage {
 
     pub(crate) fn vectors(&self) -> &[f32] {
         &self.vectors
+    }
+
+    pub(crate) fn norms(&self) -> &[f32] {
+        &self.norms
     }
 
     pub(crate) fn iter(&self) -> VectorIter<'_> {
@@ -256,6 +276,7 @@ mod tests {
         assert!(!storage.upsert(VectorId::new(7), &[1.0, 2.0]));
         assert!(storage.upsert(VectorId::new(7), &[3.0, 4.0]));
         assert_eq!(storage.get(VectorId::new(7)), Some([3.0, 4.0].as_slice()));
+        assert_eq!(storage.norms(), &[5.0]);
     }
 
     #[test]
@@ -269,5 +290,35 @@ mod tests {
         assert_eq!(storage.get(VectorId::new(3)), Some([3.0, 3.0].as_slice()));
         assert_eq!(storage.len(), 2);
         assert!(!storage.contains(VectorId::new(1)));
+    }
+
+    #[test]
+    fn remove_keeps_norms_aligned_with_swapped_rows() {
+        let mut storage = VectorStorage::with_capacity(2, 0).unwrap();
+        storage.insert(VectorId::new(1), &[3.0, 4.0]).unwrap();
+        storage.insert(VectorId::new(2), &[5.0, 12.0]).unwrap();
+        storage.insert(VectorId::new(3), &[8.0, 15.0]).unwrap();
+
+        assert_eq!(storage.remove(VectorId::new(1)), Some(vec![3.0, 4.0]));
+
+        let row = storage
+            .ids()
+            .iter()
+            .position(|id| *id == VectorId::new(3))
+            .unwrap();
+        assert_eq!(storage.norms()[row], 17.0);
+        assert_eq!(storage.vector(row), [8.0, 15.0].as_slice());
+    }
+
+    #[test]
+    fn from_parts_builds_norms() {
+        let storage = VectorStorage::from_parts(
+            2,
+            vec![VectorId::new(1), VectorId::new(2)],
+            vec![3.0, 4.0, 5.0, 12.0],
+        )
+        .unwrap();
+
+        assert_eq!(storage.norms(), &[5.0, 13.0]);
     }
 }

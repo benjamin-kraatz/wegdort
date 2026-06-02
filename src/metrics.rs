@@ -58,15 +58,20 @@ pub(crate) fn validate_vector(metric: Metric, vector: &[f32]) -> Result<()> {
     Ok(())
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(left, right)| left * right).sum()
 }
 
+pub(crate) fn vector_norm(vector: &[f32]) -> f32 {
+    vector.iter().map(|value| value * value).sum::<f32>().sqrt()
+}
+
+pub(crate) fn cosine_with_norms(a: &[f32], norm_a: f32, b: &[f32], norm_b: f32) -> f32 {
+    dot(a, b) / (norm_a * norm_b)
+}
+
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot_product = dot(a, b);
-    let norm_a = a.iter().map(|value| value * value).sum::<f32>().sqrt();
-    let norm_b = b.iter().map(|value| value * value).sum::<f32>().sqrt();
-    dot_product / (norm_a * norm_b)
+    cosine_with_norms(a, vector_norm(a), b, vector_norm(b))
 }
 
 fn squared_l2(a: &[f32], b: &[f32]) -> f32 {

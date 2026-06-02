@@ -5,6 +5,7 @@ use crate::persistence;
 use crate::search::search_storage_parallel;
 use crate::search::{SearchHit, SearchSnapshot, search_storage};
 use crate::storage::{VectorId, VectorIter, VectorStorage};
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Result of an upsert operation.
@@ -123,6 +124,16 @@ impl Store {
     /// Inserts a new vector.
     ///
     /// Duplicate ids are rejected. Use [`Store::upsert`] to insert or replace.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 2.0])?;
+    ///
+    /// assert_eq!(store.get(VectorId::new(1)), Some([1.0, 2.0].as_slice()));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn insert(&mut self, id: VectorId, vector: impl AsRef<[f32]>) -> Result<()> {
         let vector = vector.as_ref();
         self.validate_input(vector)?;
@@ -130,6 +141,23 @@ impl Store {
     }
 
     /// Inserts a new vector or replaces an existing vector with the same id.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, UpsertResult, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    ///
+    /// assert_eq!(
+    ///     store.upsert(VectorId::new(1), [1.0, 0.0])?,
+    ///     UpsertResult::Inserted
+    /// );
+    /// assert_eq!(
+    ///     store.upsert(VectorId::new(1), [0.0, 1.0])?,
+    ///     UpsertResult::Replaced
+    /// );
+    ///
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn upsert(&mut self, id: VectorId, vector: impl AsRef<[f32]>) -> Result<UpsertResult> {
         let vector = vector.as_ref();
         self.validate_input(vector)?;
@@ -141,21 +169,71 @@ impl Store {
     }
 
     /// Removes a vector and returns it if the id existed.
+    ///
+    /// Removal uses swap-remove internally, so iteration order may change.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 2.0])?;
+    ///
+    /// assert_eq!(store.remove(VectorId::new(1)), Some(vec![1.0, 2.0]));
+    /// assert!(store.is_empty());
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn remove(&mut self, id: VectorId) -> Option<Vec<f32>> {
         self.storage.remove(id)
     }
 
     /// Returns the vector for `id` without copying it.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(7), [3.0, 4.0])?;
+    ///
+    /// assert_eq!(store.get(VectorId::new(7)), Some([3.0, 4.0].as_slice()));
+    /// assert_eq!(store.get(VectorId::new(8)), None);
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn get(&self, id: VectorId) -> Option<&[f32]> {
         self.storage.get(id)
     }
 
     /// Returns true if `id` exists in the store.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(7), [3.0, 4.0])?;
+    ///
+    /// assert!(store.contains(VectorId::new(7)));
+    /// assert!(!store.contains(VectorId::new(8)));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn contains(&self, id: VectorId) -> bool {
         self.storage.contains(id)
     }
 
     /// Searches the store and returns up to `k` best matches.
+    ///
+    /// For cosine and dot product, higher scores rank first. For squared L2
+    /// distance, lower scores rank first. Equal scores are ordered by id.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::SquaredL2)?;
+    /// store.insert(VectorId::new(1), [5.0, 5.0])?;
+    /// store.insert(VectorId::new(2), [1.0, 1.0])?;
+    ///
+    /// let hits = store.search([0.0, 0.0], 1)?;
+    /// assert_eq!(hits[0].id, VectorId::new(2));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn search(&self, query: impl AsRef<[f32]>, k: usize) -> Result<Vec<SearchHit>> {
         search_storage(&self.storage, self.metric, query.as_ref(), k)
     }
@@ -189,13 +267,117 @@ impl Store {
     }
 
     /// Saves the store to a stable custom binary snapshot.
+    ///
+    /// The snapshot stores the metric, dimensions, ids, and vector rows. See
+    /// `docs/snapshot-format.md` in the repository for the byte layout.
+    ///
+    /// ```
+    /// use std::time::{SystemTime, UNIX_EPOCH};
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    /// let path = std::env::temp_dir().join(format!("wegdort-doc-{nanos}.wgd"));
+    ///
+    /// store.save(&path)?;
+    /// std::fs::remove_file(path)?;
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         persistence::save(self, path.as_ref())
     }
 
+    /// Writes the store to a writer using the stable custom binary snapshot format.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let mut bytes = Vec::new();
+    /// store.save_writer(&mut bytes)?;
+    /// assert!(!bytes.is_empty());
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn save_writer(&self, writer: &mut impl Write) -> Result<()> {
+        persistence::save_writer(self, writer)
+    }
+
     /// Loads a store from a stable custom binary snapshot.
+    ///
+    /// ```
+    /// use std::time::{SystemTime, UNIX_EPOCH};
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    /// let path = std::env::temp_dir().join(format!("wegdort-doc-load-{nanos}.wgd"));
+    ///
+    /// store.save(&path)?;
+    /// let loaded = Store::load(&path)?;
+    /// std::fs::remove_file(path)?;
+    ///
+    /// assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 0.0].as_slice()));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         persistence::load(path.as_ref())
+    }
+
+    /// Loads a store from a reader containing a stable custom binary snapshot.
+    ///
+    /// ```
+    /// use std::io::Cursor;
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let bytes = store.to_bytes()?;
+    /// let loaded = Store::load_reader(&mut Cursor::new(bytes))?;
+    ///
+    /// assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 0.0].as_slice()));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn load_reader(reader: &mut impl Read) -> Result<Self> {
+        persistence::load_reader(reader)
+    }
+
+    /// Encodes the store into snapshot bytes.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let bytes = store.to_bytes()?;
+    /// assert!(!bytes.is_empty());
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        persistence::to_bytes(self)
+    }
+
+    /// Loads a store from snapshot bytes.
+    ///
+    /// ```
+    /// use wegdort::{Metric, Store, VectorId};
+    ///
+    /// let mut store = Store::new(2, Metric::Dot)?;
+    /// store.insert(VectorId::new(1), [1.0, 0.0])?;
+    ///
+    /// let loaded = Store::from_bytes(store.to_bytes()?)?;
+    /// assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 0.0].as_slice()));
+    /// # Ok::<(), wegdort::Error>(())
+    /// ```
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self> {
+        persistence::from_bytes(bytes.as_ref())
     }
 
     /// Reserves capacity for at least `additional` more vectors.
@@ -338,6 +520,102 @@ mod tests {
         let hits = store.search([0.0, 0.0], 1).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, VectorId::new(2));
+    }
+
+    #[test]
+    fn search_returns_empty_for_empty_store() {
+        let store = Store::new(2, Metric::Dot).unwrap();
+        assert!(store.search([1.0, 0.0], 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_returns_empty_for_zero_k() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(1), [1.0, 0.0]).unwrap();
+        assert!(store.search([1.0, 0.0], 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_rejects_non_finite_query() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(1), [1.0, 0.0]).unwrap();
+        assert!(matches!(
+            store.search([1.0, f32::NAN], 1),
+            Err(Error::NonFiniteValue)
+        ));
+    }
+
+    #[test]
+    fn search_returns_all_hits_when_k_exceeds_len() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(1), [1.0, 0.0]).unwrap();
+        store.insert(VectorId::new(2), [0.0, 1.0]).unwrap();
+
+        let hits = store.search([1.0, 0.0], 99).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn cosine_scores_remain_correct_after_upsert_and_remove() {
+        let mut store = Store::new(2, Metric::Cosine).unwrap();
+        store.insert(VectorId::new(1), [3.0, 4.0]).unwrap();
+        store.insert(VectorId::new(2), [0.0, 2.0]).unwrap();
+        store.insert(VectorId::new(3), [6.0, 8.0]).unwrap();
+
+        store.upsert(VectorId::new(2), [4.0, 3.0]).unwrap();
+        assert_eq!(store.remove(VectorId::new(1)), Some(vec![3.0, 4.0]));
+
+        let hits = store.search([6.0, 8.0], 2).unwrap();
+        assert_eq!(hits[0].id, VectorId::new(3));
+        assert!((hits[0].score - 1.0).abs() < f32::EPSILON);
+        assert_eq!(store.get(VectorId::new(3)), Some([6.0, 8.0].as_slice()));
+    }
+
+    #[test]
+    fn cosine_scores_remain_correct_after_byte_round_trip() {
+        let mut store = Store::new(2, Metric::Cosine).unwrap();
+        store.insert(VectorId::new(1), [3.0, 4.0]).unwrap();
+
+        let loaded = Store::from_bytes(store.to_bytes().unwrap()).unwrap();
+        let hits = loaded.search([6.0, 8.0], 1).unwrap();
+
+        assert_eq!(hits[0].id, VectorId::new(1));
+        assert!((hits[0].score - 1.0).abs() < f32::EPSILON);
+        assert_eq!(loaded.get(VectorId::new(1)), Some([3.0, 4.0].as_slice()));
+    }
+
+    #[test]
+    fn byte_persistence_round_trips_empty_and_non_empty_stores() {
+        let empty = Store::new(2, Metric::Dot).unwrap();
+        let loaded_empty = Store::from_bytes(empty.to_bytes().unwrap()).unwrap();
+        assert!(loaded_empty.is_empty());
+
+        let mut store = Store::new(2, Metric::SquaredL2).unwrap();
+        store.insert(VectorId::new(1), [1.0, 2.0]).unwrap();
+
+        let loaded = Store::from_bytes(store.to_bytes().unwrap()).unwrap();
+        assert_eq!(loaded.metric(), Metric::SquaredL2);
+        assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 2.0].as_slice()));
+    }
+
+    #[test]
+    fn writer_and_reader_persistence_round_trip() {
+        let mut store = Store::new(2, Metric::Dot).unwrap();
+        store.insert(VectorId::new(1), [1.0, 2.0]).unwrap();
+
+        let mut bytes = Vec::new();
+        store.save_writer(&mut bytes).unwrap();
+        let loaded = Store::load_reader(&mut std::io::Cursor::new(bytes)).unwrap();
+
+        assert_eq!(loaded.get(VectorId::new(1)), Some([1.0, 2.0].as_slice()));
+    }
+
+    #[test]
+    fn from_bytes_rejects_invalid_snapshots() {
+        assert!(matches!(
+            Store::from_bytes([]),
+            Err(Error::CorruptedFile("file is shorter than snapshot header"))
+        ));
     }
 
     #[test]

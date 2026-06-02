@@ -3,6 +3,8 @@
 Wegdort is optimized for exact in-memory search before adding approximate
 nearest-neighbor indexes. The current search path uses bounded top-k selection,
 so it keeps only the best `k` candidates instead of sorting every stored vector.
+Cosine stores cache one Euclidean norm per vector row, so search computes the
+query norm once and reuses cached row norms while still preserving raw vectors.
 
 ## Benchmarks
 
@@ -21,9 +23,10 @@ cargo bench --features parallel
 The Criterion suite currently covers:
 
 - cosine, dot product, and squared L2 search;
+- cached cosine search over a larger store;
 - several store sizes for exact top-k search;
 - insert, replacement upsert, and remove loops;
-- binary snapshot save/load round trips;
+- binary snapshot path, reader/writer, and byte-buffer round trips;
 - parallel exact search when the `parallel` feature is enabled.
 
 Criterion writes reports under `target/criterion/`.
@@ -36,6 +39,10 @@ workloads, embedded callers, and users who want no runtime dependency beyond the
 standard library.
 
 Serial search keeps the crate dependency-light by default.
+
+Cosine search uses cached vector norms maintained by insert, upsert, remove,
+load, and snapshot creation. Dot product and squared L2 search do not use the
+norm cache.
 
 ## Parallel Search
 
